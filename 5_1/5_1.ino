@@ -3,7 +3,7 @@ void setup() {
   for ( int i = 2; i <= 9; i++) {
     pinMode(i, OUTPUT);
   }
-  digitalWrite(2, HIGH); // 시작과 동시에 LED 요소 a에 불이 켜짐
+  digitalWrite(9, HIGH); // 시작과 동시에 LED 요소 a에 불이 켜짐
 
 }
 
