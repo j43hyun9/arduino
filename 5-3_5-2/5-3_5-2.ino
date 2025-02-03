@@ -32,11 +32,9 @@ void setup() {
 
 void loop() {
   if (digitalRead(12) == HIGH) {
-    ++num;
-    if ( num > 9) {
-      num = 0;
+    num = random(6);
+    num = num + 1;
     }
-  }
   displayNumbers(num);
   delay(300);
 
