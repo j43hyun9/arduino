@@ -24,7 +24,8 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
-  digitalWrite(rows[1], HIGH);
-  digitalWrite(cols[1], LOW);
-  digitalWrite(cols[2], LOW);
+  for (int i=0; i<8; i++) {
+    digitalWrite(rows[i], HIGH);
+    digitalWrite(cols[0], LOW);
+  }
 }
