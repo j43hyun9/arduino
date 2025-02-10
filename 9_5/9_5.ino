@@ -1,6 +1,7 @@
 // 9-5 UART 통신을 이용한 원격제어 실험 - 슬레이브 아두이노
 int pin_LED1 = 13;
 int pin_LED2 = 12;
+
 int received_data = 5;
 
 void setup() {
