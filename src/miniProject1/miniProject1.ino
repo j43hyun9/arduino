@@ -1,13 +1,40 @@
 #include <SoftwareSerial.h>
-#include <DFPlayer_Mini_Mp3.h>
+#include <DFMiniMp3.h>
 #include <SPI.h>
 #include <MFRC522.h>
-#include <EEPROM.h>  // EEPROM 라이브러리 추가
+#include <EEPROM.h>
 
 #define SS_PIN 10
 #define RST_PIN 9
 
-SoftwareSerial mySerial(6, 7); // RX, TX
+// DFPlayer 콜백 클래스
+class Mp3Notify {
+public:
+  static void PrintlnSourceAction(DfMp3_PlaySources source, const char* action) {
+    if (source & DfMp3_PlaySources_Sd) Serial.print("SD Card, ");
+    Serial.println(action);
+  }
+  static void OnError(DFMiniMp3<SoftwareSerial, Mp3Notify>& mp3, uint16_t errorCode) {
+    Serial.print("DFPlayer Error: ");
+    Serial.println(errorCode);
+  }
+  static void OnPlayFinished(DFMiniMp3<SoftwareSerial, Mp3Notify>& mp3, DfMp3_PlaySources source, uint16_t track) {
+    Serial.print("Play finished: ");
+    Serial.println(track);
+  }
+  static void OnPlaySourceOnline(DFMiniMp3<SoftwareSerial, Mp3Notify>& mp3, DfMp3_PlaySources source) {
+    PrintlnSourceAction(source, "online");
+  }
+  static void OnPlaySourceInserted(DFMiniMp3<SoftwareSerial, Mp3Notify>& mp3, DfMp3_PlaySources source) {
+    PrintlnSourceAction(source, "inserted");
+  }
+  static void OnPlaySourceRemoved(DFMiniMp3<SoftwareSerial, Mp3Notify>& mp3, DfMp3_PlaySources source) {
+    PrintlnSourceAction(source, "removed");
+  }
+};
+
+SoftwareSerial dfSerial(6, 7); // RX, TX
+DFMiniMp3<SoftwareSerial, Mp3Notify> mp3(dfSerial);
 
 MFRC522 rfid(SS_PIN, RST_PIN);
 MFRC522::MIFARE_Key key;
@@ -27,9 +54,25 @@ int writePin = 3;
 
 int readInput = 4;
 int writeInput = 5;
-int busyPin = 8;
+int busyPin = A2;        // DFPlayer 재생 상태 확인
+
+int volumeUpPin = A0;    // 음량 증가 버튼
+int volumeDownPin = A1;  // 음량 감소 버튼
 
 #define EEPROM_SONG_INDEX_ADDR 0 // EEPROM에 노래 인덱스 저장 위치 (2바이트)
+#define EEPROM_VOLUME_ADDR 1024  // EEPROM에 음량 저장 위치 (1바이트)
+
+int currentVolume = 15;  // 현재 음량 (0~30)
+
+// 음성 안내 파일 인덱스 (SD카드 파일명 기준)
+#define VOICE_POWER_ON 0      // 0001.mp3 - 전원이 켜졌습니다
+#define VOICE_REGISTER_MODE 1 // 0002.mp3 - 등록모드
+#define VOICE_LISTEN_MODE 2   // 0003.mp3 - 읽기모드
+#define VOICE_BRING_TAG 3     // 0004.mp3 - 태그키를 가져다대세요
+#define VOICE_REGISTER_DONE 4 // 0005.mp3 - 등록완료되었습니다
+
+// 실제 노래는 5번(0006.mp3)부터 시작 (인덱스 0 = 0006.mp3)
+#define SONG_START_INDEX 5
 
 // EEPROM에 노래 인덱스 저장 함수 (int → 2바이트)
 void saveSongIndexToEEPROM(int index) {
@@ -42,6 +85,21 @@ int readSongIndexFromEEPROM() {
   int lowByte = EEPROM.read(EEPROM_SONG_INDEX_ADDR);
   int highByte = EEPROM.read(EEPROM_SONG_INDEX_ADDR + 1);
   return (highByte << 8) | lowByte;
+}
+
+// EEPROM에 음량 저장 함수
+void saveVolumeToEEPROM(int volume) {
+  EEPROM.update(EEPROM_VOLUME_ADDR, volume);
+}
+
+// EEPROM에서 음량 읽기 함수
+int readVolumeFromEEPROM() {
+  int volume = EEPROM.read(EEPROM_VOLUME_ADDR);
+  // 유효하지 않은 값이면 기본값 15 반환
+  if(volume < 0 || volume > 30) {
+    return 15;
+  }
+  return volume;
 }
 
 // UID 비교 함수
@@ -94,14 +152,23 @@ void admin_SetUp() {
   pinMode(readInput, INPUT);
   pinMode(writeInput, INPUT);
   pinMode(busyPin, INPUT);
+  pinMode(volumeUpPin, INPUT);
+  pinMode(volumeDownPin, INPUT);
   digitalWrite(readPin, HIGH);
   digitalWrite(writePin, LOW);
 }
 
 void df_Setup() {
-  mySerial.begin (9600);
-  mp3_set_serial (mySerial);  // DFPlayer-Mini mp3 소프트웨어 시리얼 설정
-  mp3_set_volume (15);
+  mp3.begin();
+
+  // EEPROM에서 저장된 음량 불러오기
+  currentVolume = readVolumeFromEEPROM();
+  mp3.setVolume(currentVolume);
+
+  Serial.print("현재 음량: ");
+  Serial.println(currentVolume);
+
+  delay(500); // DFPlayer 초기화 대기
 }
 
 void mf_Setup() {
@@ -148,21 +215,53 @@ void setup() {
   int savedIdx = readSongIndexFromEEPROM();
   Serial.print("EEPROM에서 읽은 저장된 노래 인덱스: ");
   Serial.println(savedIdx);
+
+  // 전원 켜짐 음성 안내
+  delay(500); // DFPlayer 초기화 대기
+  mp3.playMp3FolderTrack(VOICE_POWER_ON + 1); // "전원이 켜졌습니다" (1-based)
+  delay(2000); // 음성 재생 대기
 }
 
 void loop() {
+  // 음량 조절 버튼 체크 (항상 활성화)
+  static unsigned long lastVolumeChange = 0;
+  unsigned long currentTime = millis();
+
+  if(currentTime - lastVolumeChange > 200) {  // 디바운싱 200ms
+    int volumeUpState = digitalRead(volumeUpPin);
+    int volumeDownState = digitalRead(volumeDownPin);
+
+    if(volumeUpState == HIGH && currentVolume < 30) {
+      currentVolume++;
+      mp3.setVolume(currentVolume);
+      saveVolumeToEEPROM(currentVolume);
+      Serial.print("음량 증가: ");
+      Serial.println(currentVolume);
+      lastVolumeChange = currentTime;
+    } else if(volumeDownState == HIGH && currentVolume > 0) {
+      currentVolume--;
+      mp3.setVolume(currentVolume);
+      saveVolumeToEEPROM(currentVolume);
+      Serial.print("음량 감소: ");
+      Serial.println(currentVolume);
+      lastVolumeChange = currentTime;
+    }
+  }
+
   while(true) {
     int readState = digitalRead(readInput);
     int writeState = digitalRead(writeInput);
 
     if(readState == HIGH && writeState == LOW) {
       Serial.println(">> 1. 대기모드 버튼을 누르셨습니다.");
-      mp3_stop();
+      mp3.stop();
+      mp3.playMp3FolderTrack(VOICE_LISTEN_MODE + 1); // "읽기모드" (1-based)
       currentMod = LISTEN;
       delay(3000);
       break;
     } else if(writeState == HIGH && readState == LOW) {
       Serial.println(">> 2. 등록모드 버튼을 누르셨습니다.");
+      mp3.playMp3FolderTrack(VOICE_REGISTER_MODE + 1); // "등록모드" (1-based)
       currentMod = REGISTER;
       delay(3000);
       break;
@@ -233,13 +332,16 @@ void loop() {
     if(idx != -1) {
       Serial.print("태그가 배열에 있습니다. 인덱스 = ");
       Serial.println(idx);
-      Serial.print("해당 인덱스에 대해 음악 재생");
+      Serial.print("해당 인덱스에 대해 음악 재생 (파일번호: ");
+      Serial.print(idx + SONG_START_INDEX + 1);
+      Serial.println(")");
       delay(300);
 
       // 노래 인덱스 EEPROM에 저장
       saveSongIndexToEEPROM(idx);
 
-      mp3_play(idx);
+      // 실제 노래는 SONG_START_INDEX(6번)부터 시작 (1-based 인덱스)
+      mp3.playMp3FolderTrack(idx + SONG_START_INDEX + 1);
     } else {
       Serial.println("배열에 해당 태그가 없습니다.");
     }
@@ -271,7 +373,10 @@ void loop() {
         Serial.println(F(">> 등록할 태그키를 리더기에 붙여주세요."));
         Serial.print(F(">> target 음원 파일번호 : "));
         Serial.println(index);
-        
+
+        mp3.playMp3FolderTrack(VOICE_BRING_TAG + 1); // "태그키를 가져다대세요" (1-based)
+        delay(2000); // 음성 재생 대기
+
         unsigned long registerStartTime = millis();
 
         while(true) {
@@ -295,6 +400,10 @@ void loop() {
 
             // 변경된 tagUIDs EEPROM에 저장
             saveTagUIDsToEEPROM();
+
+            // 등록 완료 음성 안내
+            mp3.playMp3FolderTrack(VOICE_REGISTER_DONE + 1); // "등록완료되었습니다" (1-based)
+            delay(2000); // 음성 재생 대기
 
           } else {
             Serial.println("이미 등록된 태그입니다");
